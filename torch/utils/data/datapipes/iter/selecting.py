@@ -1,12 +1,12 @@
 from torch.utils.data import IterDataPipe
 from typing import Callable, TypeVar, Iterator
 
-from .callable import CallableIterDataPipe
+from .callable import MapIterDataPipe
 
 T_co = TypeVar('T_co', covariant=True)
 
 
-class FilterIterDataPipe(CallableIterDataPipe[T_co]):
+class FilterIterDataPipe(MapIterDataPipe[T_co]):
     r""" :class:`FilterIterDataPipe`.
 
     Iterable DataPipe to filter elements from datapipe according to filter_fn.
