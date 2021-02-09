@@ -61,23 +61,19 @@ CPUCapability get_cpu_capability();
 template <typename FnPtr, typename T>
 struct TORCH_API DispatchStub;
 
-template <typename rT, typename T, typename... Args>
-struct TORCH_API DispatchStub<rT (*)(Args...), T> {
-  using FnPtr = rT (*) (Args...);
+struct TORCH_API DispatchStubImpl {
+  virtual void* choose_cpu_fn() = 0;
+  virtual ~DispatchStubImpl() = default;
 
-  DispatchStub() = default;
-  DispatchStub(const DispatchStub&) = delete;
-  DispatchStub& operator=(const DispatchStub&) = delete;
-
-private:
-  FnPtr get_call_ptr(DeviceType device_type) {
+protected:
+  void* get_call_ptr_impl(DeviceType device_type) {
     switch (device_type) {
       case DeviceType::CPU: {
         // Use memory_order_relaxed here since even if two threads race,
         // they will still compute the same value for cpu_dispatch_ptr.
         auto fptr = cpu_dispatch_ptr.load(std::memory_order_relaxed);
         if (!fptr) {
-          fptr = choose_cpu_impl();
+          fptr = choose_cpu_fn();
           cpu_dispatch_ptr.store(fptr, std::memory_order_relaxed);
         }
         return fptr;
@@ -97,10 +93,41 @@ private:
   }
 
 public:
+  // Fixing dispatch error in Windows debug builds.
+  // See https://github.com/pytorch/pytorch/issues/22681 for more details.
+  #if defined(_MSC_VER) && defined(_DEBUG)
+    std::atomic<void*> cpu_dispatch_ptr;
+    void* cuda_dispatch_ptr;
+    void* hip_dispatch_ptr;
+  #else
+    std::atomic<void*> cpu_dispatch_ptr{nullptr};
+    void* cuda_dispatch_ptr = nullptr;
+    void* hip_dispatch_ptr = nullptr;
+  #endif
+};
+
+template <typename rT, typename T, typename... Args>
+struct TORCH_API DispatchStub<rT (*)(Args...), T>: public DispatchStubImpl {
+  using FnPtr = rT (*) (Args...);
+
+  DispatchStub() = default;
+  DispatchStub(const DispatchStub&) = delete;
+  DispatchStub& operator=(const DispatchStub&) = delete;
+
+private:
+  FnPtr get_call_ptr(DeviceType device_type) {
+    return reinterpret_cast<FnPtr>(get_call_ptr_impl(device_type));
+  }
+
+public:
   template <typename... ArgTypes>
   rT operator()(DeviceType device_type, ArgTypes&&... args) {
     FnPtr call_ptr = get_call_ptr(device_type);
     return (*call_ptr)(std::forward<ArgTypes>(args)...);
+  }
+
+  void* choose_cpu_fn() override {
+    return reinterpret_cast<void*>(choose_cpu_impl());
   }
 
   FnPtr choose_cpu_impl() {
@@ -128,17 +155,6 @@ public:
     return DEFAULT;
   }
 
-// Fixing dispatch error in Windows debug builds.
-// See https://github.com/pytorch/pytorch/issues/22681 for more details.
-#if defined(_MSC_VER) && defined(_DEBUG)
-  std::atomic<FnPtr> cpu_dispatch_ptr;
-  FnPtr cuda_dispatch_ptr;
-  FnPtr hip_dispatch_ptr;
-#else
-  std::atomic<FnPtr> cpu_dispatch_ptr{nullptr};
-  FnPtr cuda_dispatch_ptr = nullptr;
-  FnPtr hip_dispatch_ptr = nullptr;
-#endif
   static FnPtr DEFAULT;
 #ifdef HAVE_AVX_CPU_DEFINITION
   static FnPtr AVX;
@@ -155,7 +171,7 @@ namespace {
 template <typename FnPtr, typename T>
 struct RegisterCUDADispatch {
   RegisterCUDADispatch(DispatchStub<FnPtr, T>& stub, FnPtr value) {
-    stub.cuda_dispatch_ptr = value;
+    stub.cuda_dispatch_ptr = reinterpret_cast<void*>(value);
   }
 };
 
@@ -163,7 +179,7 @@ template <typename FnPtr, typename T>
 struct RegisterHIPDispatch {
   RegisterHIPDispatch(DispatchStub<FnPtr, T>& stub, FnPtr value) {
     // TODO: make this point at hip_dispatch_ptr
-    stub.cuda_dispatch_ptr = value;
+    stub.cuda_dispatch_ptr = reinterpret_cast<void*>(value);
   }
 };
 } // anonymous namespace
